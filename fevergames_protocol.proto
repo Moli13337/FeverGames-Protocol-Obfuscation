@@ -1,0 +1,2293 @@
+syntax = "proto3";
+
+// ============================================================================
+//  网易我的世界启动器 (FeverGames / NetEase Minecraft Launcher)
+//  网络协议结构定义 逆向测绘产出
+// ============================================================================
+//
+//  来源: 静态字符串提取 + 运行时证据 (CEF 缓存 / LevelDB / 崩溃转储)
+//  目标: Java 版 (FeverApps\MC\*, 1.18.42.14\*) 与 基岩版 (FeverApps\MCBedrock\*)
+//
+//  【重要边界声明】
+//  本文件只描述可观察到的 <线格式结构> (wire format)，用于协议互操作研究与
+//  安全分析。不包含、也不应被用于实现:
+//    - 伪造官方客户端身份的凭据登录 (LOADINGBAY_TOKEN / X-Client-Sign 签名)
+//    - 绕过任何身份验证、风控、实名或支付校验的机制
+//  SDK 侧的签名算法 (X-Client-Sign / Nonce / Timestamp 组合) 属于密钥派生逻辑,
+//  本测绘不还原其算法，只登记字段存在性与位置。
+//
+//  字段命名约定: 逆向所得原始字段名保留原样 (snake_case)。无法确定类型的一律
+//  使用 string 并在注释标注 (?)。
+// ============================================================================
+//
+//    组件数 102 / 域名 289 / 请求头 110 / 路径 562 / URL 231
+//
+//  通信平面 (P1–P12):
+//    P1  UniSDK 通用通信层      NtUniSdk{Base,Protocol,Mpay,Orbit,RoostX,Pharos,
+//                               FaceDetect,NgWebview,NgPersonalInfoList,Share,
+//                               QRCode,NeteaseH5Payment,Resources}
+//    P2  pharos 网络探测层      pharos.dll (Java + 基岩版各一份)
+//    P3  loadingbay 业务 API    FeverGamesInstaller.exe / FeverGamesPostUpdate.exe
+//    P4  mpay 账号与支付        mpay.dll (三份成对) + Netease.Ncg.Pay.dll
+//    P5  Orbit P2P / CDN        OrbitSDK.dll / NtUniSdkOrbit.dll
+//    P6  下载与内容寻址         downloadIPC.exe (Go) / *.fp.ps.netease.com
+//    P7  更新与安装             MCLauncherUpdater.exe / FeverGamesUpdate.exe /
+//                               nlib.dat / uninstall.dat (Inno Setup)
+//    P8  崩溃上报               CrashHunter_PC3.dll / myappdump.dll / UniCrashReporter
+//    P9  实时媒体与直播         网易 CC 全栈 / xyvodsdk.dll / VideoPlayer.dll / WebRtc.dll
+//    P10 基岩版客户端           Minecraft.Windows.exe / mcl.common*.dll / RakNet.dll
+//    P11 反作弊与环境检测        libenvsdk.dll / WinlicenseSDK / XOREncryptDLL
+//    P12 WebView 宿主           cefwebview.dll / webview_support_helper.dll
+//
+//  取证等级标注 (逐条):
+//    [E1] 直接实证 —— 字符串 / JSON 键 / URL 原文出现在二进制或运行时缓存
+//    [E2] 推导     —— 由同模块同族接口上下文推导, 未经运行时验证
+//    [E3] 未还原   —— 仅知其存在 (端点 / 头名), 载荷语义未还原
+// ============================================================================
+
+package netease.fevergames.v1;
+
+option go_package = "fevergames/v1;fevergamesv1";
+option java_package = "com.netease.fevergames.proto";
+option java_multiple_files = true;
+option csharp_namespace = "Netease.FeverGames.V1";
+
+// ============================================================================
+//  0. 通用类型 / 枚举
+// ============================================================================
+
+// 统一 JSON 外层。多数业务接口共用外层壳。
+// 键名 [E1] 来自各模块字符串提取的 JSON 键集合。
+message HttpEnvelope {
+  int32  code        = 1;
+  string msg         = 2;
+  string desc        = 3;
+  string error       = 4;
+  string data        = 5;  // 载荷占位; 具体 schema 见各接口 message
+  int64  server_time = 6;
+  string extra       = 7;
+  string type        = 8;
+  string method      = 9;
+  string body        = 10;
+}
+
+// 语义未还原的原始 HTTP 载荷。用于 P10 (Minecraft.Windows.exe) 与
+// P12 (cefwebview) 等被混淆/加壳的组件 —— 只见端点与头名, 不见 body 结构。
+message RawPayload {
+  bytes  body         = 1;  // [E3] 未解
+  uint32 path_version = 2;  // 路径 /vN 中的 N (混淆版本前缀)
+}
+
+// JSON-RPC 2.0 风格封装。
+// [E1] 实证于 1.18.42.14/backup_tools/fg_dl.exe (aria2 派生的下载后端)。
+message JsonRpcCall {
+  string jsonrpc = 1;  // "2.0"
+  string method  = 2;
+  string id      = 3;
+  string params  = 4;  // 可为对象/数组 (aria2 多元参数)
+  string result  = 5;
+  string error   = 6;
+}
+
+// 遥测 / 埋点事件。
+// [E1] 键名并集来自 nlib.dat (17 键) 与 CrashHunter/UniCrashReporter (event_info)。
+// 端点族: applog.matrix.{netease,easebar}.com/client/sdk/*
+//         sigma-fcount-webtech.proxima.nie.netease.com
+//         impression.update.{netease,easebar}.com/{orbit/v3/,logcatch/...}
+message TelemetryEvent {
+  string event        = 1;
+  string project      = 2;
+  string project_id   = 3;
+  string session_id   = 4;
+  string unique_id    = 5;
+  string udid         = 6;
+  string uuid         = 7;
+  string channel      = 8;
+  string sub_channel  = 9;
+  string version      = 10;
+  string state        = 11;
+  string source       = 12;
+  string type         = 13;
+  string branch_tag   = 14;
+  string secret       = 15;
+  string index        = 16;
+  int64  timestamp    = 17;
+  string error_reason = 18;
+  string event_info   = 19;
+}
+
+// HTTP 方法 (去噪后实际观察到的集合)
+enum HttpMethod {
+  HTTP_METHOD_UNSPECIFIED = 0;
+  HTTP_METHOD_GET         = 1;
+  HTTP_METHOD_HEAD        = 2;
+  HTTP_METHOD_OPTIONS     = 3;
+  HTTP_METHOD_POST        = 4;
+  HTTP_METHOD_PUT         = 5;
+  HTTP_METHOD_PATCH       = 6;
+  HTTP_METHOD_DELETE      = 7;
+}
+
+// 通信平面
+enum Plane {
+  PLANE_UNSPECIFIED         = 0;
+  PLANE_UNISDK_CORE         = 1;   // P1
+  PLANE_PHAROS_PROBE        = 2;   // P2
+  PLANE_LOADINGBAY_API      = 3;   // P3
+  PLANE_MPAY_ACCOUNT_PAY    = 4;   // P4
+  PLANE_ORBIT_PCDN          = 5;   // P5
+  PLANE_DOWNLOAD_CDN        = 6;   // P6
+  PLANE_UPDATE_INSTALL      = 7;   // P7
+  PLANE_CRASH_REPORT        = 8;   // P8
+  PLANE_REALTIME_MEDIA      = 9;   // P9
+  PLANE_BEDROCK_CLIENT      = 10;  // P10
+  PLANE_ENV_ANTICHEAT       = 11;  // P11
+  PLANE_WEBVIEW_HOST        = 12;  // P12
+}
+
+// 全局观测到的自定义 / 标准请求头全表 (109 项, 大小写去重后)。
+// 命名规则: 枚举值 = HEADER_ + 头名大写并把 '-' 换成 '_';
+//           注释中给出线上原文字面量。
+// 说明: 39 个为语义可读头 (认证/内容协商/媒体), 其余为模块内混淆头 (X-<随机串>),
+//       混淆头的值语义未还原 [E3]。
+enum ObservedHeader {
+  HEADER_UNSPECIFIED = 0;
+
+  // --- 标准 / 语义可读 (39) ---
+  HEADER_AUTHORIZATION           = 1;   // "Authorization"
+  HEADER_CONTENT_TYPE            = 2;   // "Content-Type"
+  HEADER_COOKIE                  = 3;   // "Cookie"
+  HEADER_NONCE                   = 4;   // "Nonce"
+  HEADER_SIGNATURE               = 5;   // "Signature"
+  HEADER_TIMESTAMP               = 6;   // "Timestamp"
+  HEADER_USER_AGENT              = 7;   // "User-Agent"
+  HEADER_X_AUTH_PRODUCT          = 8;   // "X-AUTH-PRODUCT"
+  HEADER_X_AUTH_PROJECT          = 9;   // "X-AUTH-PROJECT"
+  HEADER_X_AUTH_TOKEN            = 10;  // "X-AUTH-TOKEN" / "X-Auth-Token"
+  HEADER_X_AUTH_KEY              = 11;  // "X-Auth-Key"
+  HEADER_X_AUTH_USER             = 12;  // "X-Auth-User"
+  HEADER_X_CLIENT_SIGN           = 13;  // "X-Client-Sign"
+  HEADER_X_CONTENT_TYPE          = 14;  // "X-Content-Type"
+  HEADER_X_IPDB_LOCALE           = 15;  // "X-IPDB-LOCALE"
+  HEADER_X_LOGIN_TOKEN           = 16;  // "X-Login-Token"
+  HEADER_X_MPAY_TIMESTAMP        = 17;  // "X-Mpay-Timestamp"
+  HEADER_X_NTES_PROJECT          = 18;  // "X-NTES-PROJECT"
+  HEADER_X_NTES_SDK              = 19;  // "X-NTES-SDK"
+  HEADER_X_NTES_SIGNATURE        = 20;  // "X-Ntes-Signature"
+  HEADER_X_NTES_ORBIT_ID         = 21;  // "X-Ntes-Orbit-ID"
+  HEADER_X_NTES_ORBIT_VER        = 22;  // "X-Ntes-Orbit-Ver"
+  HEADER_X_PHAROS_ID             = 23;  // "X-Pharos-Id"
+  HEADER_X_PHAROS_VER            = 24;  // "X-Pharos-Ver"
+  HEADER_X_CDN_MANAGEMENT_URL    = 25;  // "X-CDN-Management-Url"
+  HEADER_X_SERVER_MANAGEMENT_URL = 26;  // "X-Server-Management-Url"
+  HEADER_X_STORAGE_TOKEN         = 27;  // "X-Storage-Token"
+  HEADER_X_STORAGE_URL           = 28;  // "X-Storage-Url"
+  HEADER_X_MEDIA                 = 29;  // "X-MEDIA"
+  HEADER_X_MEDIA_SEQUENCE        = 30;  // "X-MEDIA-SEQUENCE"
+  HEADER_X_STREAM_INF            = 31;  // "X-STREAM-INF"
+  HEADER_X_BYTERANGE             = 32;  // "X-BYTERANGE"
+  HEADER_X_MAP                   = 33;  // "X-MAP"
+  HEADER_X_KEY                   = 34;  // "X-KEY"
+  HEADER_X_ENDLIST               = 35;  // "X-ENDLIST"
+  HEADER_X_TARGETDURATION        = 36;  // "X-TARGETDURATION"
+  HEADER_X_PLAYLIST_TYPE         = 37;  // "X-PLAYLIST-TYPE"
+  HEADER_X_PROGRAM_DATE_TIME     = 38;  // "X-PROGRAM-DATE-TIME"
+  HEADER_X_ALLOW_CACHE           = 39;  // "X-ALLOW-CACHE"
+
+  // --- 混淆头 (70): 模块私有, 值语义未还原 [E3] ---
+  HEADER_X_A53                   = 40;  // "X-A53"
+  HEADER_X_AS5                   = 41;  // "X-AS5"
+  HEADER_X_BAHR                  = 42;  // "X-BaHR"
+  HEADER_X_CREATIONTIME          = 43;  // "X-CreationTime"
+  HEADER_X_D3Z                   = 44;  // "X-d3z"
+  HEADER_X_DEPENDS               = 45;  // "X-Depends"
+  HEADER_X_DISCONTINUITY         = 46;  // "X-DISCONTINUITY"
+  HEADER_X_DISPOSITION           = 47;  // "X-Disposition"
+  HEADER_X_E_Q                   = 48;  // "X-e-q"
+  HEADER_X_EG4                   = 49;  // "X-EG4"
+  HEADER_X_ELG                   = 50;  // "X-ELg"
+  HEADER_X_FACE                  = 51;  // "X-face"
+  HEADER_X_GE3                   = 52;  // "X-gE3"
+  HEADER_X_GPO                   = 53;  // "X-GPo"
+  HEADER_X_GVM                   = 54;  // "X-Gvm"
+  HEADER_X_HHJ                   = 55;  // "X-HhJ"
+  HEADER_X_IDATX                 = 56;  // "X-IDATx"
+  HEADER_X_IHM                   = 57;  // "X-IhM"
+  HEADER_X_IZZ                   = 58;  // "X-IzZ"
+  HEADER_X_J5K                   = 59;  // "X-j5k"
+  HEADER_X_JBJLW                 = 60;  // "X-JbJLw"
+  HEADER_X_JLKA                  = 61;  // "X-jlKA"
+  HEADER_X_JMGQ                  = 62;  // "X-JMGq"
+  HEADER_X_KCD                   = 63;  // "X-kCd"
+  HEADER_X_KVN                   = 64;  // "X-kVn"
+  HEADER_X_KZN                   = 65;  // "X-KZn"
+  HEADER_X_KOF                   = 66;  // "X-KoF"
+  HEADER_X_LANGUAGE              = 67;  // "X-Language"
+  HEADER_X_LVU                   = 68;  // "X-LVU"
+  HEADER_X_MP3_DRAFT_00          = 69;  // "X-MP3-draft-00"
+  HEADER_X_NHK                   = 70;  // "X-NHK"
+  HEADER_X_NOTICE                = 71;  // "X-Notice"
+  HEADER_X_NP0                   = 72;  // "X-np0"
+  HEADER_X_PBFI2                 = 73;  // "X-pBfI2"
+  HEADER_X_PKB                   = 74;  // "X-pkB"
+  HEADER_X_POD                   = 75;  // "X-poD"
+  HEADER_X_PTN                   = 76;  // "X-ptn"
+  HEADER_X_Q3T                   = 77;  // "X-q3T"
+  HEADER_X_QDM                   = 78;  // "X-QDM"
+  HEADER_X_QET                   = 79;  // "X-qET"
+  HEADER_X_QF1T                  = 80;  // "X-Qf1t"
+  HEADER_X_QUICKTIME             = 81;  // "X-QUICKTIME"
+  HEADER_X_QUPVO                 = 82;  // "X-qUPvo"
+  HEADER_X_QXNPSA                = 83;  // "X-QxnPsA"
+  HEADER_X_REPLACES              = 84;  // "X-Replaces"
+  HEADER_X_RGC                   = 85;  // "X-RgC"
+  HEADER_X_SV3V_ES               = 86;  // "X-SV3V-ES"
+  HEADER_X_TRTZC                 = 87;  // "X-tRtzc"
+  HEADER_X_U2O                   = 88;  // "X-U2O"
+  HEADER_X_UDH                   = 89;  // "X-Udh"
+  HEADER_X_USES                  = 90;  // "X-Uses"
+  HEADER_X_USESFONT              = 91;  // "X-UsesFont"
+  HEADER_X_VERSION               = 92;  // "X-VERSION"
+  HEADER_X_VIDEO                 = 93;  // "X-Video"
+  HEADER_X_WLLX                  = 94;  // "X-WlLX"
+  HEADER_X_WTRTP                 = 95;  // "X-WtRTp"
+  HEADER_X_WUC                   = 96;  // "X-WUc"
+  HEADER_X_XA0T                  = 97;  // "X-xa0T"
+  HEADER_X_XHXCX                 = 98;  // "X-XHXcX"
+  HEADER_X_XQP                   = 99;  // "X-XqP"
+  HEADER_X_XY_BIP                = 100; // "X-Xy-Bip"
+  HEADER_X_XY_BIPH               = 101; // "X-Xy-BipH"
+  HEADER_X_XY_CIPH               = 102; // "X-Xy-CipH"
+  HEADER_X_XY_NTYPE              = 103; // "X-Xy-Ntype"
+  HEADER_X_Y_Z                   = 104; // "X-Y-Z"
+  HEADER_X_YE38                  = 105; // "X-Ye38"
+  HEADER_X_YT5U                  = 106; // "X-yT5u"
+  HEADER_X_Z0S                   = 107; // "X-Z0S"
+  HEADER_X_Z6X                   = 108; // "X-z6X"
+  HEADER_X_ZEHGO                 = 109; // "X-zEhGO"
+}
+
+// ============================================================================
+//  P1. UniSDK 通用通信层
+//  Java 版与基岩版共用同一套模块 (NtUniSdk* 在 MC\ 与 MCBedrock\ 成对存在,
+//  体积/内容近逐字节相同)。双域名冗余: netease.com / easebar.com 成对。
+// ============================================================================
+
+// ---- 1.1 身份公告 (whoami) ----
+// 端点: https://whoami.nie.{netease,easebar}.com/v6
+//       https://who.{easebar,nie}.com/v2      (旧版, NtUniSdkProtocol 使用)
+//       https://who.nie.163.com               (CEF 缓存实证, 已废弃入口)
+// 证据: [E1] whoami/ v6 与 httpdns/impression 同族出现; CEF 缓存含 who.nie.163.com
+message WhoAmIRequest {
+  string deviceid    = 1;  // 设备指纹, 形如 00:50:56:C0:00:01
+  string channel     = 2;  // 分发渠道, 官方为 mkt-x19-official
+  string sub_channel = 3;
+  string version     = 4;  // w1.18.42.14
+  string region      = 5;  // 如 US
+  string locale      = 6;  // 如 zh_Hans
+  string lang        = 7;  // 如 zh_Hans
+  string os_type     = 8;  // 如 windesktop
+  string udid        = 9;  // [E1] nlib.dat 键
+  string unique_id   = 10; // [E1] nlib.dat 键
+}
+
+message WhoAmIResponse {
+  string uid         = 1;
+  string deviceid    = 2;
+  string session     = 3;  // (?) 会话标识
+  int64  server_time = 4;
+  string uuid        = 5;  // [E1] nlib.dat 键
+}
+
+// ---- 1.2 SDK 协议模板分发 ----
+// 端点: https://protocol.unisdk.netease.com/api/template/v89/latest.json
+//       https://unisdk.update.netease.com/html/latest_v89.json
+//       https://unisdk.update.netease.com/html/latest_v165.html   (JS 变体)
+//       https://unisdk.update.netease.com/html/latest_default.json (CEF 实证)
+//       https://protocol.unisdk.netease.com/release/latest_v15.html
+//       https://unisdk.update.netease.com/assets/protocol/           (CEF 实证)
+//       https://protocol.unisdk.netease.com/tpsl/pc_class
+message ProtocolTemplate {
+  string version                 = 1;  // 模板版本 (路径 v89 / v165 / v15)
+  repeated ProtocolEntry entries = 2;
+  bool   enable                  = 3;
+  repeated string params         = 4;
+}
+
+message ProtocolEntry {
+  string name   = 1;
+  string url    = 2;
+  string hash   = 3;
+  uint64 bytes  = 4;   // 资源大小, 与 hash 配对构成资源清单项
+  string md5    = 5;
+  string type   = 6;
+  bool   enable = 7;
+}
+
+// ---- 1.3 功能开关 / 灰度 (feature2) ----
+// 端点: https://g0.gsf.{netease,easebar,easbar}.com/feature2
+// 证据: [E1] NtUniSdkMpay / RoostX / Orbit / Pharos / FaceDetect 同族引用
+message FeatureToggleRequest {
+  string project        = 1;
+  string channel        = 2;
+  string sub_channel    = 3;
+  string version        = 4;
+  repeated string keys  = 5;
+  string udid           = 6;
+}
+
+message FeatureToggleResponse {
+  int32  code               = 1;
+  string msg                = 2;
+  repeated FeatureItem items = 3;
+}
+
+message FeatureItem {
+  string key   = 1;
+  string value = 2;
+  string type  = 3;
+  int64  ttl   = 4;
+}
+
+// ---- 1.4 HTTPDNS 与 hdserver 寻址 ----
+// 端点: https://httpdns.nie.{netease,easebar}.com/v2/
+//       https://dns.update.{netease,easebar}.com/hdserver
+//       https://%s/v2?domain=%s   (NtUniSdkOrbit / AudioService 实证)
+// 说明: hdserver 返回与 /feature2 相同的开关壳, 但用于下发 DNS 加速配置。
+message HttpDnsRequest {
+  repeated string domains = 1;
+  string project          = 2;
+  string sdk_version      = 3;
+}
+
+message HttpDnsResponse {
+  int32  code                      = 1;
+  string msg                       = 2;
+  repeated HttpDnsRecord records   = 3;
+}
+
+message HttpDnsRecord {
+  string domain          = 1;
+  repeated string ips    = 2;
+  int32  ttl             = 3;
+  string cname           = 4;
+}
+
+// ---- 1.5 RoostX / MGB 回退域名清单 ----
+// 端点: https://mgb.update.{netease,easebar}.com/fallback.list
+//       https://mgb.update.{netease,easebar}.com/fallbacktest.list
+//       https://dep410.update.easebar.com/   (基岩版 RoostX 专有)
+//       https://8.8.8.8/resolve              (明文 DNS 回退)
+message FallbackListRequest {
+  string project  = 1;
+  string version  = 2;
+  string platform = 3;
+}
+
+message FallbackListResponse {
+  repeated FallbackEndpoint endpoints = 1;
+  int64  update_time                  = 2;
+}
+
+message FallbackEndpoint {
+  string host     = 1;
+  int32  port     = 2;
+  string protocol = 3;   // http / https / udp / tcp
+  int32  weight   = 4;
+}
+
+// ---- 1.6 SDK 日志上传 (applog.matrix) ----
+// 端点: https://applog.matrix.{netease,easebar}.com/client/sdk/
+//         {clientlog, ff_log, open_log, pay_log}
+// 证据: [E1] 多模块共用; pay_log 仅 MPayCliCppWrapper.dll 引用
+message SdkLogUpload {
+  string project       = 1;
+  string channel       = 2;
+  string sdk_version   = 3;
+  string uid           = 4;
+  string udid          = 5;
+  string log_type      = 6;   // clientlog / ff_log / open_log / pay_log
+  string content       = 7;
+  int64  timestamp     = 8;
+  string width         = 9;   // [E1] pay_log 专有 (MPayCliCppWrapper)
+  string height        = 10;
+  string anchor        = 11;
+  string channel_ui    = 12;  // [E2] 对应 "channel"
+}
+
+// ---- 1.7 UniSDK 模块级端点索引 (登记用, 非线上报文) ----
+// 所有模块共享认证头族:
+//   {Authorization, Cookie, Timestamp, Signature, Nonce, X-Client-Sign, User-Agent}
+message UniSdkModuleEntry {
+  string module            = 1;  // NtUniSdkBase / Mpay / Orbit / RoostX / ...
+  Plane  plane             = 2;
+  string base_url          = 3;
+  repeated string paths    = 4;
+  repeated ObservedHeader headers = 5;
+}
+
+// ---- 1.8 TPSL 分类上报 / 客户端加密数据 ----
+// 端点: https://tpsl.nie.netease.com/api/v1/class/upload
+//       {loadingbay}/v1/client/unisdk_encrypt_data
+message TpslClassUpload {
+  string project   = 1;
+  string uid       = 2;
+  string class_id  = 3;   // (?) 分类标识
+  string payload   = 4;   // 加密体 [E3]
+  int64  timestamp = 5;
+}
+
+message UnisdkEncryptData {
+  string data      = 1;   // SDK 侧加密后的不透明串 [E3]
+  string version   = 2;
+  int64  timestamp = 3;
+}
+
+// ============================================================================
+//  P2. pharos 网络探测 / 路径优化层
+//  组件: FeverApps\MC\pharos.dll (1024512 B) 与 FeverApps\MCBedrock\pharos.dll
+//        (1170944 B) —— 两份近同源, 基岩版略大。
+//  域名: pharos.{netease,easebar}.com        (主控制面)
+//        dual.pharos.{netease,easebar}.com   (双栈 IPv4+IPv6)
+//        explore.pharos.{netease,easebar}.com(探测探针)
+//        sigma-pharosv3-pathn.proxima.nie.{netease,easebar}.com
+//        service.mkey.163.com                (鉴权旁路)
+//        www.baidu.com                       (可达性基线探测)
+//  头:   X-Pharos-Id / X-Pharos-Ver / X-Content-Type
+// ============================================================================
+
+// 探测任务下发。GET /v1/tasks/  (返回待探测目标清单)
+message PharosTasksRequest {
+  string project        = 1;
+  string version        = 2;   // 对应 JSON 键 "version"
+  string pharos_id      = 3;   // X-Pharos-Id
+  string pharos_ver     = 4;   // X-Pharos-Ver
+  string protocol       = 5;   // 期望协议族 (tcp / udp / http / https)
+  int32  timeout        = 6;   // 单目标超时 (ms)
+  int32  interval       = 7;   // 探测间隔 (ms)
+  int32  fetch_interval = 8;   // 拉取任务的间隔 (ms)
+  int32  max_threads    = 9;
+  int32  max_hop        = 10;  //  traceroute 最大跳数
+}
+
+message PharosTasksResponse {
+  string client_ip              = 1;   // 服务端观测到的探测源 IP
+  int32  count                  = 2;
+  repeated PharosTarget targets = 3;
+  repeated PharosTask tasks     = 4;
+}
+
+message PharosTarget {
+  string host  = 1;
+  int32  port  = 2;
+  string proto = 3;
+  string params = 4;
+  uint64 size  = 5;   // 探测载荷大小
+}
+
+message PharosTask {
+  string task_id  = 1;
+  string subtype  = 2;
+  string protocol = 3;
+  repeated PharosTarget targets = 4;
+  int32  timeout  = 5;
+  bytes  bytes    = 6;   // [E3] 二进制任务体
+}
+
+// 设备画像 / 网络画像上报。POST /v1/profiles/
+message PharosProfileReport {
+  string project    = 1;
+  string pharos_id  = 2;
+  string pharos_ver = 3;
+  string client_ip  = 4;
+  string protocol   = 5;
+  uint64 size       = 6;
+  bytes  bytes      = 7;   // [E3]
+}
+
+// 静态资源提速配置。GET /api/v1/static/lighten/
+message PharosStaticLighten {
+  string project = 1;
+  string domain  = 2;
+  string path    = 3;
+}
+
+// 港湾式探测聚合。POST /api/v1/harbor/
+message PharosHarborReport {
+  string project  = 1;
+  string subtype  = 2;
+  repeated PharosTask tasks = 3;
+  string params   = 4;
+}
+
+// sigma-* 上报 (错误 / v3 版本)
+// 端点: https://sigma-pharosv3-pathn.proxima.nie.{netease,easebar}.com/{v3,error}
+message PharosSigmaV3Report {
+  string project    = 1;
+  string pharos_id  = 2;
+  string protocol   = 3;
+  string client_ip  = 4;
+  int32  max_hop    = 5;
+  int32  max_threads = 6;
+  string params     = 7;
+  bytes  bytes      = 8;   // [E3]
+}
+
+message PharosErrorReport {
+  string project  = 1;
+  string code     = 2;
+  string reason   = 3;
+  string version  = 4;
+  string extra    = 5;
+}
+
+// ============================================================================
+//  P3. loadingbay 客户端业务 API
+//  组件: 1.18.42.14\FeverGamesInstaller.exe (80.7 MB, 268 路径)
+//        1.18.42.14\FeverGamesPostUpdate.exe (1.59 MB, 96 路径)
+//  主机: api.loadingbay.com / loadingbaycn.webapp.163.com
+//        loadingbaycn-qa.webapp.163.com / loadingbaycn-client-web-qa.webapp.163.com
+//        loadingbaycn-websocket.webapp.163.com / ...-websocket-qa.webapp.163.com
+//  专有头 (7): X-A53, X-AUTH-PROJECT, X-AUTH-TOKEN, X-IDATx, X-LVU, X-NHK, X-Y-Z
+//  通用头族: Authorization, Cookie, Timestamp, Signature, X-Auth-Token, X-Auth-User
+//  说明: 两个 exe 的路径集合高度重叠, 视为同一 API 的两代客户端。
+// ============================================================================
+
+// ---- 3.1 登录 / 会话 ----
+// POST /v1/login          POST /v1/login/logout    POST /v1/login/mock
+// POST /v1/login/on_guest_bind_account             GET  /v1/login/state
+// POST /v1/login/ticket   POST /v1/login/tourist   POST /v1/login/ws_token
+// POST /login/mpay_ticket (mpay 票据换取 loadingbay 会话)
+message LoginRequest {
+  string account         = 1;
+  string token           = 2;   // mpay ticket / oauth token
+  string login_type      = 3;   // tourist / qrcode / ticket / third_party
+  string deviceid        = 4;
+  string sdkuid          = 5;   // 路径 /sdkuid 实证
+  string gameid          = 6;   // 路径 /gameid 实证
+  string channel         = 7;
+  string sub_channel     = 8;
+  string version         = 9;
+  string mpay_ticket     = 10;
+  string third_party     = 11;
+  string udid            = 12;
+}
+
+message LoginResponse {
+  int32  code          = 1;
+  string msg           = 2;
+  string token         = 3;   // 会话票据 (后续 X-AUTH-TOKEN)
+  string sdkuid        = 4;
+  string uid           = 5;
+  string nickname      = 6;
+  string avatar        = 7;
+  bool   is_tourist    = 8;
+  int64  expire_time   = 9;
+  string ws_token      = 10;  // /v1/login/ws_token
+  string login_state   = 11;  // /v1/login/state
+  string usercard      = 12;  // 路径 /usercard
+}
+
+// ---- 3.2 用户资料 ----
+// GET  /v1/user, /v1/user/online_status, /v1/user/search
+// POST /v1/user_settings, /v1/user/game_account, /v1/user/game_account/list
+message UserProfile {
+  string uid             = 1;
+  string nickname        = 2;
+  string avatar          = 3;
+  string account         = 4;
+  string online_status   = 5;
+  string region          = 6;
+  string age_info        = 7;
+  int32  age             = 8;
+  bool   pin_authorized  = 9;   // /v1/user/age_info/pin_authorized_action
+  string user_settings   = 10;
+  string game_account    = 11;
+}
+
+message UserSearchRequest {
+  string keyword  = 1;
+  int32  offset   = 2;
+  int32  limit    = 3;
+}
+
+// ---- 3.3 第三方账号绑定 ----
+// GET/POST /v1/third_party_account, /v1/third_party_account/ticket
+message ThirdPartyAccountRequest {
+  string platform   = 1;   // qq / weibo / wechat / battlenet
+  string ticket     = 2;
+  string openid     = 3;
+  string action     = 4;   // bind / unbind / query
+}
+
+message ThirdPartyAccountResponse {
+  int32  code         = 1;
+  string msg          = 2;
+  repeated ThirdPartyBinding bindings = 3;
+}
+
+message ThirdPartyBinding {
+  string platform     = 1;
+  string nickname     = 2;
+  string avatar       = 3;
+  bool   bound        = 4;
+}
+
+// ---- 3.4 实名 / 防沉迷 / 家长监护 ----
+// GET  /v1/game_extend/x20/student_verify      (学生认证)
+// GET  /api/account/parent/verify/redirect     (家长验证跳转)
+// GET  /api/parent/pin/redirect                (家长 PIN 跳转)
+// 关联 SDK 面: NtUniSdkBase -> /api/realname/{query,redirect}
+message RealnameVerifyRequest {
+  string uid          = 1;
+  string realname     = 2;
+  string idcard       = 3;   // 明文不上送, SDK 侧加密 [E3]
+  string token        = 4;
+  string action       = 5;   // query / verify / redirect
+  string student_code = 6;   // x20/student_verify
+  string pin          = 7;   // 家长 PIN
+}
+
+message RealnameVerifyResponse {
+  int32  code          = 1;
+  string msg           = 2;
+  string redirect_url  = 3;
+  int32  age           = 4;
+  bool   verified      = 5;
+  string realname_masked = 6;
+  string limit_type    = 7;   // 防沉迷限制类型
+  string failed_face_url = 8;
+}
+
+// ---- 3.5 游戏库 (game_library) —— 客户端主业务面 ----
+// GET/POST /v1/game_library/app              (应用详情)
+//          /v1/game_library/app/list         (应用列表)
+//          /v1/game_library/app/brief_list   (精简列表)
+//          /v1/game_library/app/activity_news(活动资讯)
+//          /v1/game_library/app/ownership    (拥有关系)
+//          /v1/game_library/app/precheck     (启动前置检查)
+//          /v1/game_library/app/startup      (启动)
+//          /v1/game_library/app/startup_check(启动检查)
+//          /v1/game_library/app/startup_tips (+/action)
+//          /v1/game_library/app/exit         (退出上报)
+//          /v1/game_library/app/tick         (心跳)
+//          /v1/game_library/app/download_check
+//          /v1/game_library/app/download_limit/status
+//          /v1/game_library/app/platform_check
+//          /v1/game_library/app/reg_limit/status
+//          /v1/game_library/app/remove
+//          /v1/game_library/app/remove_dlc_red_point
+//          /v1/game_library/app/reset_all
+//          /v1/game_library/app_group
+//          /v1/game_library/hidden_app (+/list)
+//          /v1/game_library/ticket
+message GameAppRequest {
+  string app_id          = 1;   // 对应路径 /games/app- 与键 app_id
+  string app_content_id  = 2;
+  string project_id      = 3;
+  string gameid          = 4;
+  string channel         = 5;
+  string version         = 6;   // version_code
+  string platform        = 7;
+  string action          = 8;
+  string dlc_id          = 9;
+  bool   need_dlc        = 10;
+  int32  offset          = 11;
+  int32  limit           = 12;
+}
+
+message GameAppInfo {
+  string app_id           = 1;
+  string name             = 2;
+  string icon             = 3;
+  string brief            = 4;
+  string version          = 5;
+  uint64 bytes            = 6;   // 安装体积
+  string status           = 7;   // 未安装 / 已安装 / 可更新
+  string download_url     = 8;
+  string manifest_url     = 9;
+  string manifest_xxh     = 10;  // downloadIPC 同名字段
+  bool   owned            = 11;
+  bool   hidden           = 12;
+  repeated GameDlc dlcs   = 13;
+  string startup_tips     = 14;
+  string activity_news    = 15;
+  string group            = 16;  // app_group
+  bool   reg_limited      = 17;
+  bool   download_limited = 18;
+  bool   platform_ok      = 19;
+  string ticket           = 20;  // /v1/game_library/ticket
+}
+
+message GameDlc {
+  string dlc_id            = 1;
+  string app_id            = 2;
+  string name              = 3;
+  string version           = 4;
+  uint64 bytes             = 5;
+  bool   owned             = 6;
+  bool   red_point         = 7;
+  string download_url      = 8;
+}
+
+message GameLibraryListResponse {
+  int32  code                     = 1;
+  string msg                      = 2;
+  repeated GameAppInfo apps       = 3;
+  repeated GameAppInfo hidden_apps = 4;
+  int32  total                    = 5;
+}
+
+// 启动 / 心跳 / 退出
+message GameStartupRequest {
+  string app_id      = 1;
+  string gameid      = 2;
+  string session_id  = 3;
+  string branch_tag  = 4;
+  string platform    = 5;
+  string version     = 6;
+}
+
+message GameStartupResponse {
+  int32  code          = 1;
+  string msg           = 2;
+  bool   allow         = 3;
+  string ticket        = 4;
+  string tips          = 5;
+  repeated string actions = 6;
+  int64  server_time   = 7;
+}
+
+// 拥有关系 / 内容商品 (与 game_store 同族)
+message ContentGoodsRequest {
+  string app_id          = 1;
+  string app_content_id  = 2;
+  string goods_id        = 3;
+  string action          = 4;   // free_gain / free_trial / ownership
+  string project_id      = 5;
+}
+
+message ContentGoodsInfo {
+  string goods_id     = 1;
+  string app_id       = 2;
+  string name         = 3;
+  string desc         = 4;
+  int64  price        = 5;
+  string currency     = 6;
+  bool   owned        = 7;
+  bool   free_trial   = 8;
+  string cover        = 9;
+}
+
+// ---------------------------------------------------------------------------
+// 3.3 friend 好友体系  /v1/friend/*
+// ---------------------------------------------------------------------------
+message FriendListRequest {
+  string user_id    = 1;
+  string page_token = 2;
+  int32  page_size  = 3;
+  int32  list_type  = 4;   // 好友/最近/申请 分组
+}
+
+message FriendInfo {
+  string user_id     = 1;
+  string nickname    = 2;
+  string avatar      = 3;
+  string signature   = 4;
+  int32  online_state = 5;
+  string game_id     = 6;   // 正在玩
+  int64  last_seen   = 7;
+}
+
+message FriendListResponse {
+  repeated FriendInfo items      = 1;
+  string              page_token = 2;
+  bool                has_more   = 3;
+  int32               total      = 4;
+}
+
+message FriendOpRequest {           // add / delete / accept / reject / block / remark
+  string user_id   = 1;
+  string target_id = 2;
+  string remark    = 3;
+  string source    = 4;   // 申请来源渠道
+}
+
+message FriendOpResponse {
+  int32  code   = 1;
+  string msg    = 2;
+  string request_id = 3;
+}
+
+// ---------------------------------------------------------------------------
+// 3.4 message_box 站内信 /v1/message_box/*
+// ---------------------------------------------------------------------------
+message MessageBoxRequest {
+  string user_id    = 1;
+  string box_type   = 2;   // system / activity / friend
+  string page_token = 3;
+  int32  page_size  = 4;
+  bool   unread_only = 5;
+}
+
+message MessageBoxItem {
+  string msg_id    = 1;
+  string title     = 2;
+  string content   = 3;
+  string jump_url  = 4;
+  int64  send_time = 5;
+  bool   read      = 6;
+  string attach    = 7;   // 附件道具 JSON 串
+}
+
+message MessageBoxResponse {
+  repeated MessageBoxItem items      = 1;
+  string                  page_token = 2;
+  int32                   unread     = 3;
+}
+
+message MessageBoxAckRequest {       // 已读回执
+  string user_id = 1;
+  repeated string msg_ids = 2;
+}
+
+// ---------------------------------------------------------------------------
+// 3.5 client_push 长连接/推送注册  /v1/client_push/*
+// ---------------------------------------------------------------------------
+message PushRegisterRequest {
+  string user_id      = 1;
+  string device_id    = 2;
+  string push_token   = 3;
+  string channel      = 4;   // 厂商推送通道
+  string app_version  = 5;
+  string platform     = 6;
+  repeated string topics = 7;
+}
+
+message PushRegisterResponse {
+  int32  code        = 1;
+  string session_id  = 2;
+  string push_host   = 3;   // 长连接接入点
+  int32  push_port   = 4;
+  int32  heartbeat_s = 5;
+  string secret      = 6;
+}
+
+message PushMessage {                 // 下行帧
+  string msg_id   = 1;
+  string type     = 2;   // notify / kick / config_reload / chat
+  bytes  payload  = 3;
+  int64  ts       = 4;
+}
+
+// ---------------------------------------------------------------------------
+// 3.6 config 远程配置  /v1/config/*
+// ---------------------------------------------------------------------------
+message ClientConfigRequest {
+  string app_id      = 1;
+  string channel     = 2;
+  string version     = 3;
+  string platform    = 4;
+  repeated string keys = 5;
+  string region      = 6;
+}
+
+message ClientConfigResponse {
+  map<string, string> entries   = 1;
+  int32               version   = 2;
+  int64               expire_at = 3;
+  string              sign      = 4;
+}
+
+// ---------------------------------------------------------------------------
+// 3.7 trade 订单  /v1/trade/order
+// ---------------------------------------------------------------------------
+message TradeOrderRequest {
+  string app_id     = 1;
+  string goods_id   = 2;
+  string order_id   = 3;
+  int32  quantity   = 4;
+  string pay_channel = 5;
+  string ext        = 6;
+}
+
+message TradeOrderResponse {
+  string order_id   = 1;
+  string pay_url    = 2;
+  string pay_params = 3;   // 渠道下单参数
+  int32  state      = 4;
+  int64  amount     = 5;
+  string currency   = 6;
+}
+
+// ---------------------------------------------------------------------------
+// 3.8 app_search 搜索  /v1/app_search/top_n
+// ---------------------------------------------------------------------------
+message AppSearchRequest {
+  string keyword   = 1;
+  int32  top_n     = 2;
+  string category  = 3;
+  string platform  = 4;
+}
+
+message AppSearchItem {
+  string app_id   = 1;
+  string name     = 2;
+  string icon     = 3;
+  double score    = 4;   // 召回权重
+  string type     = 5;   // game / component / ugc
+}
+
+message AppSearchResponse {
+  repeated AppSearchItem items = 1;
+  repeated string        hot_words = 2;
+  string                 request_id = 3;
+}
+
+// ---------------------------------------------------------------------------
+// 3.9 file_distribution 文件分发 /v1/file_distribution/*
+//     与 P6 downloadIPC.exe 的本地 RPC 同名族，此处为公网侧
+// ---------------------------------------------------------------------------
+message FileDistributionDownloadRequest {
+  string app_id       = 1;
+  string version_code = 2;   // 已被 decode_version_code 解码后的十进制串
+  string file_id      = 3;   // hex24 或 hex/dec 组合，见 CDN 内容寻址
+  uint64 offset       = 4;
+  uint64 length       = 5;
+  int32  chunk_index  = 6;
+  string manifest_sig = 7;
+}
+
+message FileDistributionDownloadResponse {
+  string url        = 1;   // 通常指向 x19.fp.ps.netease.com
+  string manifest   = 2;
+  uint64 total_size = 3;
+  string hash       = 4;
+  int32  chunk_size = 5;
+  int32  chunk_count = 6;
+  repeated string mirrors = 7;
+}
+
+message FileDistributionReportChunkRequest {
+  string app_id       = 1;
+  string version_code = 2;
+  string file_id      = 3;
+  repeated int32 ok_chunks  = 4;
+  repeated int32 bad_chunks = 5;
+  string client_id    = 6;
+}
+
+message ManifestUrlSumRequest {          // /v1/file_distribution_v2/manifest_urlsum
+  string app_id       = 1;
+  string version_code = 2;
+  repeated string urls = 3;
+  string sum_type     = 4;   // md5 / xxh64 / sha1
+}
+
+message ManifestUrlSumResponse {
+  repeated string sums = 1;
+  string          algo = 2;
+}
+
+message DecodeVersionCodeRequest {       // /v1/file_distribution_v2/decode_version_code
+  string version_code = 1;
+  string channel      = 2;
+}
+
+message DecodeVersionCodeResponse {
+  string decoded   = 1;   // 十进制 20 位
+  string channel   = 2;
+  int64  build_ts  = 3;
+}
+
+// ---------------------------------------------------------------------------
+// 3.10 game_discussion 社区帖 /v1/game_discussion/*
+// ---------------------------------------------------------------------------
+message DiscussionListRequest {
+  string app_id     = 1;
+  string board_id   = 2;
+  string page_token = 3;
+  int32  page_size  = 4;
+  string sort       = 5;   // hot / new
+}
+
+message DiscussionItem {
+  string post_id    = 1;
+  string author_id  = 2;
+  string author_name = 3;
+  string title      = 4;
+  string content    = 5;
+  repeated string images = 6;
+  int32  like_count  = 7;
+  int32  reply_count = 8;
+  int64  create_time = 9;
+}
+
+message DiscussionListResponse {
+  repeated DiscussionItem items      = 1;
+  string                  page_token = 2;
+  bool                    has_more   = 3;
+}
+
+message DiscussionPostRequest {
+  string app_id   = 1;
+  string board_id = 2;
+  string post_id  = 3;
+  string title    = 4;
+  string content  = 5;
+  repeated string images = 6;
+  string action   = 7;   // create / reply / like / delete
+}
+
+// ---------------------------------------------------------------------------
+// 3.11 event 客户端埋点 /v1/event/client_log_upload
+// ---------------------------------------------------------------------------
+message EventLogUploadRequest {
+  string user_id   = 1;
+  string device_id = 2;
+  string app_id    = 3;
+  repeated TelemetryEvent events = 4;
+  int64  batch_ts  = 5;
+  string session_id = 6;
+}
+
+message EventLogUploadResponse {
+  int32  code       = 1;
+  int32  accepted   = 2;
+  int64  retry_ms   = 3;
+}
+
+// ---------------------------------------------------------------------------
+// 3.12 token 短令牌 /token/fp/gen
+// ---------------------------------------------------------------------------
+message FingerprintTokenRequest {
+  string fp        = 1;   // 设备指纹
+  string scene     = 2;   // 使用场景
+  string app_id    = 3;
+  string udid      = 4;
+  string nonce     = 5;
+}
+
+message FingerprintTokenResponse {
+  string token     = 1;
+  int64  expire_at = 2;
+  string scene     = 3;
+}
+
+// ---------------------------------------------------------------------------
+// 3.13 feedback 用户反馈 /v1/feedback/*
+// ---------------------------------------------------------------------------
+message FeedbackSubmitRequest {
+  string user_id     = 1;
+  string app_id      = 2;
+  string category    = 3;
+  string content     = 4;
+  repeated string images = 5;
+  string contact     = 6;
+  string device_info = 7;
+  repeated string logs = 8;
+}
+
+message FeedbackSubmitResponse {
+  string ticket_id = 1;
+  string status    = 2;
+}
+
+// ---------------------------------------------------------------------------
+// 3.14 network_probe 网络探测配置 /v1/network_probe/config
+// ---------------------------------------------------------------------------
+message NetworkProbeConfigRequest {
+  string app_id   = 1;
+  string user_id  = 2;
+  string region   = 3;
+  string isp      = 4;
+}
+
+message NetworkProbeConfigResponse {
+  repeated string ping_targets = 1;
+  repeated string http_targets = 2;
+  int32  interval_s  = 3;
+  int32  sample_count = 4;
+  bool   upload_enable = 5;
+  string upload_url  = 6;
+}
+
+// ---------------------------------------------------------------------------
+// 3.15 filepicker / exchange_code 通用小接口
+// ---------------------------------------------------------------------------
+message FilePickerRequest {
+  string user_id   = 1;
+  string app_id    = 2;
+  string file_type = 3;   // image / video / log
+  int32  max_size  = 4;
+}
+
+message FilePickerResponse {
+  string upload_url = 1;
+  string file_id    = 2;
+  string token      = 3;
+  int64  expire_at  = 4;
+}
+
+message ExchangeCodeRequest {          // 登录码/活动码兑换
+  string user_id  = 1;
+  string code     = 2;
+  string scene    = 3;
+  string channel  = 4;
+}
+
+message ExchangeCodeResponse {
+  int32  code    = 1;
+  string msg     = 2;
+  string reward  = 3;   // 奖励内容 JSON
+  string jump_url = 4;
+}
+
+// 3.16 download_client / upgrade —— 分发客户端自升级
+message DownloadClientUpgradeRequest {
+  string channel      = 1;
+  string version      = 2;
+  string arch         = 3;
+  string current_hash = 4;
+  string os_version   = 5;
+}
+
+message DownloadClientUpgradeResponse {
+  bool   has_update = 1;
+  string version    = 2;
+  string url        = 3;
+  string hash       = 4;
+  uint64 size       = 5;
+  bool   force      = 6;
+  string release_note = 7;
+}
+
+// 3.17 loadingbay 统一响应包装 (E2)
+message LoadingbayEnvelope {
+  int32  code    = 1;
+  string msg     = 2;
+  bytes  data    = 3;   // 业务实体 JSON
+  string trace_id = 4;
+  string sign    = 5;
+}
+
+// ===========================================================================
+// P4  mpay 账号与支付平面
+//  证据: mpay.dll (9,406,968 B, 153 路径) / mpay_interface.dll /
+//        MPayCliCppWrapper.dll / Netease.Ncg.Pay.dll
+//  传输头: X-JMGq / X-Mpay-Timestamp (+ 通用 X-Client-Sign)
+//  注: 支付结果校验与票据兑换的回调验签属密钥派生逻辑, 本测绘只登记字段位置。
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// 4.1 账号登录 /users/login/*
+// ---------------------------------------------------------------------------
+message MpayMobileLoginRequest {          // /users/login/mobile/{send_code,verify,login}
+  string mobile      = 1;   // 手机号 (加密/哈希后传输, E3)
+  string area_code   = 2;
+  string code        = 3;   // 短信验证码
+  string password    = 4;   // 密码登录分支
+  string device_id   = 5;
+  string app_id      = 6;
+  string channel     = 7;
+  string version     = 8;
+  string captcha     = 9;   // 风控验证凭据
+}
+
+message MpayPcOauthRequest {              // /users/login/pc/oauth
+  string app_id      = 1;
+  string redirect_uri = 2;
+  string state       = 3;
+  string scope       = 4;
+  string response_type = 5;
+  string device_id   = 6;
+}
+
+message MpayOauthTokenRequest {           // oauth token 交换
+  string grant_type = 1;
+  string code       = 2;
+  string redirect_uri = 3;
+  string client_id  = 4;
+}
+
+message MpayQrcodeExchangeTokenRequest {  // /users/login/qrcode/exchange_token
+  string qr_id      = 1;   // 二维码会话 ID
+  string ticket     = 2;   // 扫码后服务端下发的一次性票据
+  string device_id  = 3;
+  string app_id     = 4;
+}
+
+message MpayTicketLoginRequest {          // /users/login/ticket
+  string ticket     = 1;
+  string app_id     = 2;
+  string device_id  = 3;
+  string extra      = 4;
+}
+
+message MpayCreateTicketRequest {         // /users/create_ticket
+  string user_id    = 1;
+  string scene      = 2;   // 登录 / 支付 / 实名
+  string app_id     = 3;
+  string target     = 4;
+}
+
+message MpayCreateTicketResponse {
+  string ticket     = 1;
+  int64  expire_at  = 2;
+  string scene      = 3;
+  string qr_url     = 4;
+}
+
+message MpayCheckTokenRequest {           // /users/check_token
+  string token      = 1;
+  string app_id     = 2;
+}
+
+message MpayLoginResponse {
+  string user_id     = 1;
+  string access_token = 2;
+  string refresh_token = 3;
+  string session_id   = 4;
+  int64  expire_in    = 5;
+  string nickname     = 6;
+  string avatar       = 7;
+  string mobile_mask  = 8;
+  bool   need_realname = 9;
+  int32  age_status    = 10;   // 防沉迷状态
+  string login_token   = 11;   // Netease.Ncg.Pay 侧 X-Login-Token 来源
+}
+
+// ---------------------------------------------------------------------------
+// 4.2 二维码 /qrcode/*
+// ---------------------------------------------------------------------------
+message MpayQrcodeCreateRequest {         // /qrcode/{create_login,create_pay}
+  string scene      = 1;
+  string app_id     = 2;
+  string device_id  = 3;
+  string order_id   = 4;   // create_pay 时携带
+  int32  size       = 5;
+  string color      = 6;
+}
+
+message MpayQrcodeCreateResponse {
+  string qr_id     = 1;
+  string qr_url    = 2;   // 被编码进二维码的跳转地址
+  string image_url = 3;   // /qrcode/image
+  int64  expire_at = 4;
+  string poll_token = 5;
+}
+
+message MpayQrcodeQueryRequest {          // /qrcode/{query,query_external}
+  string qr_id     = 1;
+  string poll_token = 2;
+  string scene    = 3;
+}
+
+message MpayQrcodeQueryResponse {
+  int32  state     = 1;   // wait / scanned / confirmed / expired / canceled
+  string user_id   = 2;
+  string ticket    = 3;
+  string order_id  = 4;
+  string pay_state = 5;
+}
+
+message MpayQrcodeContractQueryRequest {  // /qrcode/contract/query
+  string qr_id     = 1;
+  string contract_type = 2;   // 免密代扣等签约查询
+  string user_id   = 3;
+}
+
+// ---------------------------------------------------------------------------
+// 4.3 支付 /payments/*
+// ---------------------------------------------------------------------------
+message MpayOneStepPaymentRequest {       // /payments/one_step_payment/games
+  string order_id    = 1;
+  string game_id     = 2;
+  string product_id  = 3;
+  string product_name = 4;
+  int64  amount      = 5;   // 最小货币单位
+  string currency    = 6;
+  string pay_channel = 7;   // alipay / wxpay / qrcode / balance
+  string notify_url  = 8;
+  string extra       = 9;   // 渠道透传
+  string user_id     = 10;
+  string ticket      = 11;
+}
+
+message MpayPayConfirmRequest {           // /payments/pay_confirm/{query,confirm,cancel}
+  string order_id  = 1;
+  string trade_no  = 2;   // 渠道侧交易号
+  string pay_state = 3;
+  string sign      = 4;   // 渠道回调验签字段
+  string channel   = 5;
+}
+
+message MpayPaymentResponse {
+  string order_id   = 1;
+  string trade_no   = 2;
+  int32  state      = 3;
+  int64  amount     = 4;
+  string pay_url    = 5;
+  string pay_params = 6;   // 拉起渠道 SDK 的参数包
+  int64  pay_time   = 7;
+  string product_id = 8;
+}
+
+// ---------------------------------------------------------------------------
+// 4.4 客户端通用 /v3/client/*
+// ---------------------------------------------------------------------------
+message MpayClientConfigRequest {         // /v3/client/config
+  string app_id     = 1;
+  string version    = 2;
+  string platform   = 3;
+  string channel    = 4;
+}
+
+message MpayClientConfigResponse {
+  string  host          = 1;
+  repeated string pay_channels = 2;
+  bool    realname_required = 3;
+  string  agreement_url  = 4;
+  string  privacy_url    = 5;
+  int32   age_limit      = 6;
+}
+
+message MpayClientDeviceRequest {         // /v3/client/device
+  string device_id  = 1;
+  string udid       = 2;
+  string model      = 3;
+  string os         = 4;
+  string mac        = 5;
+  string imei       = 6;
+  string idfv       = 7;
+  string android_id = 8;
+}
+
+message MpayAccountBindRequest {          // 账号绑定/解绑
+  string user_id    = 1;
+  string bind_type  = 2;   // mobile / email / third_party
+  string target     = 3;
+  string code       = 4;
+  string action     = 5;   // bind / unbind / query
+}
+
+message MpayRealnameVerifyRequest {       // /users/realname/verify
+  string user_id    = 1;
+  string real_name  = 2;   // 姓名 (传输可能加密, E3)
+  string id_card    = 3;   // 身份证号 (传输可能加密, E3)
+  string mobile     = 4;
+  string scene      = 5;
+}
+
+message MpayRealnameVerifyResponse {
+  int32  code       = 1;
+  string msg        = 2;
+  bool   verified   = 3;
+  int32  age        = 4;
+  bool   adult      = 5;
+  string encrypt_id = 6;
+}
+
+message MpaySmsRequest {                  // 短信/邮箱验证码
+  string mobile    = 1;
+  string scene     = 2;   // login / bind / pay / realname
+  string captcha   = 3;
+  string area_code = 4;
+}
+
+// ---------------------------------------------------------------------------
+// 4.5 网易支付 WebView 充值 Netease.Ncg.Pay.dll
+//   POST https://%s/topup/game-webview/checkout  头: X-Login-Token
+// ---------------------------------------------------------------------------
+message NcgPayCheckoutRequest {
+  string game_id     = 1;
+  string product_id  = 2;
+  string amount      = 3;
+  string currency    = 4;
+  string order_id    = 5;
+  string redirect_url = 6;
+  string platform    = 7;
+}
+
+message NcgPayCheckoutResponse {
+  int32  code      = 1;
+  string checkout_url = 2;
+  string order_id  = 3;
+  string pay_params = 4;
+}
+
+// ===========================================================================
+// P5  Orbit P2P / CDN 平面
+//  证据: OrbitSDK.dll (9,079,288 B) / NtUniSdkOrbit.dll (Java+Bedrock)
+//  端点: https://filecatch.nie.%s/api/v1/log
+//        https://impression.update.%s/logcatch/%s/%s.json
+//        sigma-orbitv3-impression.proxima.nie.*
+//        httpdns.nie.* / dep410.update.easebar.com
+//  传输头: X-NTES-PROJECT / X-NTES-SDK / X-Ntes-Orbit-ID / X-Ntes-Orbit-Ver
+// ===========================================================================
+
+message OrbitLogUploadRequest {           // filecatch.nie.*/api/v1/log
+  string project    = 1;   // X-NTES-PROJECT
+  string sdk_ver    = 2;   // X-NTES-SDK
+  string orbit_id   = 3;   // X-Ntes-Orbit-ID
+  string orbit_ver  = 4;   // X-Ntes-Orbit-Ver
+  repeated OrbitLogEntry logs = 5;
+  string device_id  = 6;
+  int64  ts         = 7;
+}
+
+message OrbitLogEntry {
+  string tag     = 1;
+  int64  ts      = 2;
+  string level   = 3;
+  string content = 4;
+  map<string, string> extra = 5;
+}
+
+message OrbitImpressionReport {           // impression.update.*/logcatch/<app>/<ver>.json
+  string app_id     = 1;
+  string version    = 2;
+  string scene      = 3;
+  string node_id    = 4;   // 命中的 P2P/CDN 节点
+  int64  bytes      = 5;
+  int64  cost_ms    = 6;
+  int32  result     = 7;
+  string error_msg  = 8;
+}
+
+message OrbitNodeListRequest {            // P2P 种子/节点下发
+  string key        = 1;   // get_node_list?key=
+  string hash       = 2;   // 资源内容哈希
+  string scene      = 3;
+  string client_ip  = 4;
+  string isp        = 5;
+}
+
+message OrbitNode {
+  string host      = 1;
+  int32  port      = 2;
+  string proto     = 3;   // http / https / udp / p2p
+  int32  weight    = 4;
+  string region    = 5;
+  string isp       = 6;
+  bool   encrypted = 7;
+}
+
+message OrbitNodeListResponse {
+  repeated OrbitNode nodes     = 1;
+  string             tracker   = 2;
+  int32              ttl_s     = 3;
+  string             auth      = 4;   // 节点接入凭据 (值语义未还原, E3)
+}
+
+message OrbitSigmaReport {                // sigma-orbitv3-impression.proxima.nie.*
+  string app_id    = 1;
+  string version   = 2;
+  string session   = 3;
+  repeated OrbitSigmaSample samples = 4;
+  string network_type = 5;
+  string carrier   = 6;
+}
+
+message OrbitSigmaSample {
+  string host      = 1;
+  string ip        = 2;
+  int64  rtt_ms    = 3;
+  int64  down_bps  = 4;
+  int32  loss_permille = 5;
+  int32  status    = 6;
+}
+
+// ===========================================================================
+// P6  下载与内容寻址平面  downloadIPC.exe (Go) + libcurl 下载层
+//  本地 RPC: http://127.0.0.1:5000  /  http://127.0.0.1:7000
+//  129 路径 / 84 JSON 字段; Go 源文件名泄露:
+//    /download_ipc/{download,heartbeat,ipc,main,util,version}.go
+//    /downloadable_v2/{createtruncate,finish_upload,gen_token,update_manifest_classic,update_manifest_url}.go
+//  公网: x19-h.gdl.netease.com / x19.fp.ps.netease.com / x19.gdl.netease.com
+// ===========================================================================
+
+message DownloadIpcVersionResponse {      // GET /download_ipc/version
+  string version   = 1;
+  int32  api_level = 2;
+  string build_id  = 3;
+  repeated string features = 4;
+}
+
+message DownloadIpcHeartbeatRequest {     // POST /download_ipc/heartbeat
+  string client_id = 1;
+  repeated DownloadTaskState running = 2;
+  int64  ts        = 3;
+}
+
+message DownloadTaskState {
+  string task_id    = 1;
+  int32  state      = 2;   // pending/running/paused/done/failed
+  uint64 done_bytes = 3;
+  uint64 total_bytes = 4;
+  int32  speed_bps  = 5;
+  int32  error_code = 6;
+  string error_msg  = 7;
+}
+
+message DownloadCreateRequest {           // /download_ipc/download (+downloadable_v2)
+  string url        = 1;
+  string target_path = 2;
+  string file_id    = 3;   // 内容寻址 ID
+  uint64 expect_size = 4;
+  string expect_hash = 5;
+  int32  thread_num  = 6;
+  bool   resume      = 7;
+  string app_id      = 8;
+  string version_code = 9;
+  repeated string mirrors = 10;
+  string referer     = 11;
+  string user_agent  = 12;
+  map<string, string> headers = 13;
+}
+
+message DownloadCreateResponse {
+  string task_id   = 1;
+  int32  state     = 2;
+  string local_path = 3;
+}
+
+message DownloadableCreateTruncateRequest {   // /downloadable_v2/createtruncate
+  string path      = 1;
+  uint64 size      = 2;
+  string file_id   = 3;
+  bool   sparse    = 4;
+}
+
+message DownloadableFinishUploadRequest {     // /downloadable_v2/finish_upload
+  string file_id   = 1;
+  string path      = 2;
+  string hash      = 3;
+  uint64 size      = 4;
+  string manifest  = 5;
+}
+
+message DownloadableGenTokenRequest {         // /downloadable_v2/gen_token
+  string app_id    = 1;
+  string file_id   = 2;
+  string version_code = 3;
+  string scene     = 4;
+}
+
+message DownloadableGenTokenResponse {
+  string token     = 1;
+  string url       = 2;
+  int64  expire_at = 3;
+  repeated string mirrors = 4;
+}
+
+message UpdateManifestClassicRequest {        // /downloadable_v2/update_manifest_classic
+  string app_id    = 1;
+  string version   = 2;
+  string channel   = 3;
+  string manifest_url = 4;
+}
+
+message UpdateManifestUrlRequest {            // /downloadable_v2/update_manifest_url
+  string app_id    = 1;
+  string version   = 2;
+  string manifest_url = 3;
+  string sum       = 4;
+}
+
+message ManifestFileEntry {
+  string path      = 1;
+  string file_id   = 2;
+  uint64 size      = 3;
+  string hash      = 4;   // md5/xxh64
+  int32  chunk_count = 5;
+  string chunk_hash = 6;
+  bool   executable = 7;
+  string category  = 8;   // core / asset / library / java / mod
+}
+
+message ManifestResponse {
+  string app_id    = 1;
+  string version   = 2;
+  repeated ManifestFileEntry files = 3;
+  uint64 total_size = 4;
+  string manifest_hash = 5;
+  int32  schema    = 6;
+}
+
+// ===========================================================================
+// P7  更新与安装平面
+//  Java : MCLauncherUpdater.exe  → x19.gdl.netease.com / x19.update.* /
+//         x19apigatewayobt.nie.* / x19mclobt.nie.* (+ /salog/urgent-log)
+//  安装 : FeverGamesUpdate.exe / FeverGamesInstaller.exe /
+//         FeverGamesPostUpdate.exe / WPFInstaller.exe (336.9 MB)
+//  卸载 : Inno Setup → nlib.dat / uninstall.dat / uninstall.exe / nlib.exe
+//         头: X-Auth-Token / X-Auth-User
+// ===========================================================================
+
+message UpdateCheckRequest {              // 更新检查
+  string app_id     = 1;
+  string version    = 2;
+  string channel    = 3;
+  string arch       = 4;
+  string device_id  = 5;
+  string os_version = 6;
+  string locale     = 7;
+  int32  protocol_ver = 8;
+}
+
+message UpdateCheckResponse {
+  bool   has_update   = 1;
+  bool   force        = 2;
+  string version      = 3;
+  string min_version  = 4;
+  string release_note = 5;
+  string manifest_url = 6;
+  string manifest_xxh = 7;
+  uint64 total_size   = 8;
+  repeated UpdatePackage packages = 9;
+  string salog_url    = 10;
+}
+
+message UpdatePackage {
+  string name     = 1;
+  string url      = 2;
+  string hash     = 3;
+  uint64 size     = 4;
+  string type     = 5;   // full / incremental / hotfix
+  int32  priority = 6;
+}
+
+message UrgentLogUploadRequest {          // /salog/urgent-log
+  string app_id    = 1;
+  string version   = 2;
+  string device_id = 3;
+  string user_id   = 4;
+  repeated UrgentLogEntry entries = 5;
+  string reason    = 6;
+}
+
+message UrgentLogEntry {
+  string tag     = 1;
+  int64  ts      = 2;
+  string level   = 3;
+  string content = 4;
+}
+
+message InstallerReportRequest {          // 安装/升级阶段上报
+  string app_id    = 1;
+  string stage     = 2;   // download / verify / extract / install / post_update
+  int32  progress  = 3;
+  int32  error_code = 4;
+  string error_msg = 5;
+  string version   = 6;
+  string machine_id = 7;
+}
+
+message UninstallAuthRequest {            // nlib.dat / uninstall.dat (Inno)
+  string udid       = 1;
+  string unique_id  = 2;
+  string uuid       = 3;
+  string app_id     = 4;
+  string channel    = 5;
+  string version    = 6;
+  string os_version = 7;
+  string cpu        = 8;
+  string mac        = 9;
+  string disk_id    = 10;
+  string device_name = 11;
+  int64  install_ts  = 12;
+  int64  last_run_ts = 13;
+  string locale      = 14;
+  string resolution  = 15;
+  string gpu         = 16;
+  string user_id     = 17;
+}
+
+// ===========================================================================
+// P8  崩溃上报平面
+//  证据: CrashHunter_PC3.dll → appdump.nie.{easebar,netease}.com/upload
+//        myappdump.dll / UniCrashReporter.exe / Loop0.exe
+//  字段: event_info (嵌套)
+// ===========================================================================
+
+message CrashReportRequest {              // appdump.nie.*/upload
+  string app_id     = 1;
+  string version    = 2;
+  string device_id  = 3;
+  string user_id    = 4;
+  string crash_type = 5;   // native / managed / hang / script
+  string event_info = 6;   // 嵌套 JSON 串 (未完全结构化还原, E2)
+  string stack      = 7;
+  string module     = 8;
+  int64  crash_ts   = 9;
+  string game_id    = 10;
+  string os_version = 11;
+  map<string, string> tags = 12;
+  repeated string attachments = 13;   // dump 文件 ID
+}
+
+message CrashReportResponse {
+  int32  code      = 1;
+  string report_id = 2;
+  string upload_url = 3;
+  int64  expire_at = 4;
+}
+
+message DumpUploadRequest {               // myappdump.dll 转储上传
+  string report_id = 1;
+  string dump_id   = 2;
+  bytes  chunk     = 3;
+  int32  chunk_index = 4;
+  uint64 offset    = 5;
+  uint64 total     = 6;
+}
+
+message LoopGuardReport {                 // Loop0.exe 死循环/卡死守卫
+  string pid        = 1;
+  string process    = 2;
+  string module     = 3;
+  int32  stuck_ms   = 4;
+  string stack      = 5;
+  string scene      = 6;
+  string device_id  = 7;
+}
+
+// ===========================================================================
+// P9  实时媒体与直播平面 (网易 CC 全栈 + xyvod P2P + WebRTC)
+//  证据:
+//    CCLiveDataSdk / CCMsgSdk   → api.cc.163.com /v1/distroommsg/serviceip
+//    AudioService.dll           → audiouser.cc.163.com /v1/sdkctrl/check
+//                                 gate.cc.163.com /userlogin/get_ex_linkd
+//                                 statlog.cc.{163,netease}.com /query
+//    AudioCC / AudioCore / AudioEngine
+//                                → http://%s:%d/qnet/get_node_list?key=%s
+//    VideoPlayer.dll            → HLS 播放头全表
+//    ccprotocal / iplay / p2p_layer → udp.v.cc.163.pull.com
+//    xyvodsdk.dll (8,336,376 B) → seeds-open.xinqiucc.com /api/sdk/get_seeds
+//                                 sd-glsky.xycdn.com /psdk/getsdks
+//                                 sd-gl.comfylink.com /psdk/getseeds_v3
+//                                 ipip-gl1.hongboluo.com /multiDnsQuery
+//                                 头: X-Xy-Bip / X-Xy-BipH / X-Xy-CipH / X-Xy-Ntype
+//    WebRtc.dll                 → libwebrtc SDP/ICE 信令面
+// ===========================================================================
+
+message LiveServiceIpRequest {            // api.cc.163.com/v1/distroommsg/serviceip
+  string room_id   = 1;
+  string user_id   = 2;
+  string app_id    = 3;
+  string protocol  = 4;
+}
+
+message LiveServiceIpResponse {
+  repeated LiveEndpoint endpoints = 1;
+  int32  ttl_s     = 2;
+  string token     = 3;
+}
+
+message LiveEndpoint {
+  string host    = 1;
+  int32  port    = 2;
+  string proto   = 3;   // tcp / udp / ws / wss
+  int32  weight  = 4;
+  string region  = 5;
+}
+
+message LiveRoomMsg {                     // 直播间消息帧
+  string room_id   = 1;
+  string user_id   = 2;
+  string nickname  = 3;
+  string content   = 4;
+  int32  msg_type  = 5;   // chat / gift / enter / like / notice
+  int64  ts        = 6;
+  string extra     = 7;
+}
+
+message AudioSdkCtrlCheckRequest {        // audiouser.cc.163.com/v1/sdkctrl/check
+  string app_id    = 1;
+  string version   = 2;
+  string device_id = 3;
+  string user_id   = 4;
+  string scene     = 5;
+}
+
+message AudioSdkCtrlCheckResponse {
+  int32  code      = 1;
+  bool   enable    = 2;
+  string config    = 3;   // 音频参数配置 JSON
+  repeated string capabilities = 4;
+}
+
+message GateUserLoginRequest {            // gate.cc.163.com/userlogin/get_ex_linkd
+  string user_id   = 1;
+  string token     = 2;
+  string room_id   = 3;
+  string app_id    = 4;
+  string device_id = 5;
+}
+
+message GateUserLoginResponse {
+  string linkd_host = 1;
+  int32  linkd_port = 2;
+  string session    = 3;
+  int64  expire_at  = 4;
+  string extra      = 5;   // 80+ 附加字段族 (E2)
+}
+
+message StatlogQueryRequest {             // statlog.cc.{163,netease}.com/query
+  string app_id    = 1;
+  string scene     = 2;
+  string device_id = 3;
+  repeated LiveStatSample samples = 4;
+}
+
+message LiveStatSample {
+  string metric  = 1;
+  int64  value   = 2;
+  int64  ts      = 3;
+  map<string, string> dims = 4;
+}
+
+message QnetNodeListRequest {             // http://%s:%d/qnet/get_node_list?key=%s
+  string key       = 1;
+  string room_id   = 2;
+  string user_id   = 3;
+  string proto     = 4;
+  string client_ip = 5;
+  string isp       = 6;
+}
+
+message QnetNodeListResponse {
+  repeated QnetNode nodes = 1;
+  int32 ttl_s  = 2;
+  string token = 3;
+}
+
+message QnetNode {
+  string host   = 1;
+  int32  port   = 2;
+  int32  weight = 3;
+  string region = 4;
+  string isp    = 5;
+}
+
+message XyvodSeedsRequest {               // /api/sdk/get_seeds | /psdk/getsdks | /psdk/getseeds_v3
+  string hash       = 1;   // 资源哈希
+  string file_hash  = 2;
+  string scene      = 3;
+  string user_id    = 4;
+  string device_id  = 5;
+  string ntype      = 6;   // X-Xy-Ntype
+  string bip        = 7;   // X-Xy-Bip
+  int32  version    = 8;
+}
+
+message XyvodSeed {
+  string host      = 1;
+  int32  port      = 2;
+  string proto     = 3;
+  int32  weight    = 4;
+  int64  rtt_ms    = 5;
+  string region    = 6;
+  string isp       = 7;
+  bool   encrypted = 8;
+}
+
+message XyvodSeedsResponse {
+  repeated XyvodSeed seeds = 1;
+  string tracker    = 2;
+  int32  ttl_s      = 3;
+  string session    = 4;
+  string signature  = 5;
+}
+
+message MultiDnsQueryRequest {            // ipip-gl1.hongboluo.com/multiDnsQuery
+  repeated string hosts = 1;
+  string client_ip  = 2;
+  string isp        = 3;
+  string scene      = 4;
+}
+
+message MultiDnsQueryResponse {
+  repeated XyvodDnsRecord records = 1;
+  int32 ttl_s = 2;
+}
+
+message XyvodDnsRecord {
+  string host   = 1;
+  repeated string ips = 2;
+  int64  rtt_ms = 3;
+  string isp    = 4;
+  string region = 5;
+}
+
+message HlsPlaybackRequest {              // VideoPlayer.dll HLS 拉流
+  string url       = 1;
+  string referer   = 2;
+  map<string, string> headers = 3;
+  int32  quality   = 4;   // X-*-Quality 系列头
+  string drm_token = 5;   // (值语义未还原, E3)
+}
+
+message WebrtcSignalMessage {             // WebRtc.dll 信令
+  string type      = 1;   // offer / answer / candidate / bye
+  string sdp       = 2;
+  string candidate = 3;
+  string sdp_mid   = 4;
+  int32  sdp_mline_index = 5;
+  string session_id = 6;
+  string room_id   = 7;
+  string from      = 8;
+  string to        = 9;
+}
+
+// ===========================================================================
+// P10  基岩版客户端平面 (Minecraft.Windows.exe / mcl.common*.dll / RakNet.dll)
+//  证据:
+//    Minecraft.Windows.exe (74,140,680 B) → /im /log
+//      头: X-Gvm / X-IhM / X-KZn / X-KoF / X-d3z / X-qET / X-zEhGO
+//    mcl.common.dll        → 头 X-Ye38 / X-np0
+//    mcl.common.gray.dll   → 头 X-tRtzc
+//    RakNet.dll            → 联机 UDP 二进制协议 (RakNet 兼容层)
+//  说明: 基岩版复用与 Java 版同一套 UniSDK 通信层 (NtUniSdk* 成对存在)，
+//        下列消息为基岩版客户端自身直连的服务端接口。
+// ===========================================================================
+
+message BedrockImRequest {                // /im 即时消息/联机信令
+  string user_id   = 1;
+  string session   = 2;
+  string room_id   = 3;
+  string content   = 4;
+  int32  msg_type  = 5;
+  string extra     = 6;
+  string device_id = 7;
+  int64  ts        = 8;
+}
+
+message BedrockImResponse {
+  int32  code      = 1;
+  string msg_id    = 2;
+  string server_ts = 3;
+  repeated BedrockImRequest messages = 4;
+}
+
+message BedrockLogRequest {               // /log 客户端日志/遥测
+  string user_id   = 1;
+  string device_id = 2;
+  string version   = 3;
+  string level     = 4;
+  repeated string entries = 5;
+  string crash_id  = 6;
+  int64  ts        = 7;
+}
+
+message BedrockSessionInfo {              // 基岩版会话/联机房间
+  string room_id      = 1;
+  string host_id      = 2;
+  string world_id     = 3;
+  repeated BedrockPlayer players = 4;
+  int32  max_players  = 5;
+  string version      = 6;
+  bool   invite_only  = 7;
+  string join_code    = 8;
+}
+
+message BedrockPlayer {
+  string user_id   = 1;
+  string gamertag  = 2;
+  string xuid      = 3;   // Xbox Live ID
+  string skin_id   = 4;
+  int32  permission = 5;
+  int64  join_ts   = 6;
+}
+
+// ---------------------------------------------------------------------------
+// RakNet 联机层 (UDP, 二进制)
+//   本测绘不还原其二进制线格式；仅登记外层封装与已知消息族。
+//   RakNet 标准离线握手/在线消息语义见 upstream 规范。
+// ---------------------------------------------------------------------------
+message RakNetDatagram {
+  uint32 packet_type   = 1;   // RakNet 消息 ID
+  uint64 send_time     = 2;
+  bytes  payload       = 3;   // 内部位流 (位对齐, 未还原, E3)
+  int32  reliability   = 4;
+  uint32 ordering_index = 5;
+  uint32 ordering_channel = 6;
+  bytes  frame_set     = 7;
+}
+
+// ===========================================================================
+// P11  反作弊与环境检测平面
+//  证据: libenvsdk.dll (头 X-ptn) / WinlicenseSDK / SecureEngineSDK32 /
+//        Snappy.NET / XOREncryptDLL.dll / detect 模块
+//  说明: 本平面只登记 <上报字段存在性>，不还原其判定逻辑或绕过方式。
+// ===========================================================================
+
+message EnvSdkReportRequest {             // libenvsdk.dll 环境上报 (头 X-ptn)
+  string device_id   = 1;
+  string user_id     = 2;
+  string app_id      = 3;
+  string os_version  = 4;
+  string cpu         = 5;
+  string gpu         = 6;
+  string memory      = 7;
+  string disk        = 8;
+  string mac         = 9;
+  string volume_serial = 10;
+  repeated string processes = 11;   // 检测到的可疑进程名单
+  repeated string modules   = 12;   // 已加载模块名单
+  bool   debugger    = 13;
+  bool   virtual_machine = 14;
+  string integrity   = 15;   // 完整性校验字段 (值语义未还原, E3)
+  string scene       = 16;
+}
+
+message EnvSdkReportResponse {
+  int32  code     = 1;
+  int32  verdict  = 2;   // 判定结果枚举 (语义未还原, E3)
+  string action   = 3;
+  int64  next_probe_ms = 4;
+}
+
+// ===========================================================================
+// P12  WebView 宿主平面
+//  证据: cefwebview.dll / webview_support_helper.dll / webview_support.dll
+//        (CEF 运行时; 缓存与 Local Storage 提供真实会话状态证据)
+//  说明: 承载 mpay 支付页、实名页、活动页等 H5 流程。
+// ===========================================================================
+
+message WebviewOpenRequest {              // 宿主 → CEF 打开页面
+  string url          = 1;
+  string title        = 2;
+  bool   modal        = 3;
+  int32  width        = 4;
+  int32  height       = 5;
+  map<string, string> headers = 6;
+  string inject_js    = 7;
+  bool   cookie_share = 8;
+  string scene        = 9;
+}
+
+message WebviewJavascriptBridge {         // JS ↔ Native 桥消息
+  string callback_id = 1;
+  string method      = 2;
+  string params      = 3;   // JSON 串
+  string result      = 4;
+  int32  error_code  = 5;
+}
+
+// ===========================================================================
+// X  跨平面：CDN 内容寻址与本地会话状态
+// ===========================================================================
+
+// 7.1 x19 CDN 内容寻址结构
+//   x19-h.gdl.netease.com         → /{hex16}/{decimal20}.index
+//   x19.fp.ps.netease.com         → /file/<hex24><base62>NN
+//   x19.gdl.netease.com           → 更新/资源分发
+message CdnContentAddress {
+  string host       = 1;   // x19-h.gdl.netease.com 等
+  string hex16      = 2;   // 16 位十六进制前缀 (分桶)
+  string decimal20  = 3;   // 20 位十进制版本/内容号
+  string file_id    = 4;   // hex24 + base62 后缀
+  string suffix     = 5;   // NN
+  string index_path = 6;   // /{hex16}/{decimal20}.index
+  string file_path  = 7;   // /file/<...>
+}
+
+message CdnIndexFile {                    // .index 内容结构 (E2)
+  string version    = 1;
+  repeated ManifestFileEntry files = 2;
+  uint64 total_size = 3;
+  string manifest_hash = 4;
+}
+
+// 7.2 本地持久化会话状态 (来自 CEF 缓存 / 配置文件的实证字段)
+message LocalSessionState {
+  string udid        = 1;
+  string unique_id   = 2;
+  string uuid        = 3;
+  string device_id   = 4;
+  string machine_id  = 5;
+  string user_id     = 6;
+  string nickname    = 7;
+  string avatar      = 8;
+  string loadingbay_token = 9;   // 仅登记字段存在性；不做凭据登录实现
+  string session_id  = 10;
+  string channel     = 11;
+  string install_id  = 12;
+  int64  login_ts    = 13;
+  int64  last_run_ts = 14;
+  string install_dir = 15;
+  string version     = 16;
+  string locale      = 17;
+}
+
+message LocalLauncherConfig {             // 启动器本地配置
+  repeated string servers        = 1;
+  string  last_server           = 2;
+  repeated string protocol_hosts = 3;
+  string  httpdns_host          = 4;
+  bool    enable_orbit          = 5;
+  bool    enable_p2p            = 6;
+  int32   download_thread       = 7;
+  string  download_ipc_endpoint = 8;   // 127.0.0.1:5000 / :7000
+  string  channel               = 9;
+  map<string, string> extra     = 10;
+}
+
+// 7.3 通用错误响应 (跨平面)
+message ErrorResponse {
+  int32  code       = 1;
+  string message    = 2;
+  string trace_id   = 3;
+  int64  server_ts  = 4;
+  string detail     = 5;
+  string retry_after = 6;
+}
+
+// ===========================================================================
+// 附录 A  端点索引 (按通信平面)
+//   来源: catalog.md 全量去噪汇总 —— 102 组件 / 289 域名 / 110 请求头 /
+//         562 路径 / 231 URL。此处列出跨组件复现、可确认为协议面的端点。
+//   域名通配说明: nie.*   = nie.easebar.com / nie.netease.com (双域名冗余)
+//                 %s / %d = 由本地配置或 httpdns 下发动态填充
+// ===========================================================================
+
+// --- A.1  P1 UniSDK 通用通信层 ---------------------------------------------
+//  whoami.nie.*/v6                      身份公告 (WhoAmI)
+//  who.easebar.com/v2                   身份公告备用域
+//  nt-protocol.g.mkey.163.com/api/config_v2   SDK 协议模板分发
+//  g0.gsf.easbar.com/feature2           feature2 灰度开关 (域名拼写异常: 缺 't')
+//  gsf.*/fallback.list                  RoostX / MGB 端点回退清单
+//  *httpdns* / hdserver                 HTTPDNS 解析
+//  */accountlog  */ff_log  */open_log  */pay_log   SDK 日志四通道
+//  impression.update.*                  SDK 曝光/行为上报
+//  dep410.update.easebar.com            RoostX 依赖更新
+//  /v1/open/share/feed/init             分享回流
+//  /api/personal/link                   个人信息关联
+
+// --- A.2  P2 pharos 网络探测层 ---------------------------------------------
+//  dual.pharos.*      /v1/profiles /v1/tasks   Java + 基岩版各一份 pharos.dll
+//  explore.pharos.*   /api/v1/harbor /api/v1/static/lighten
+//                     sigma v3 上报
+//  头: X-Pharos-Id / X-Pharos-Ver
+
+// --- A.3  P3 loadingbay 业务平面 -------------------------------------------
+//  Base                        FeverGamesInstaller.exe / FeverGamesPostUpdate.exe
+//  /v1/app/*                   应用详情 / 拥有关系
+//  /v1/game_library/*          游戏库 / 启动 / DLC / 内容商品
+//  /v1/friend/*                好友
+//  /v1/message_box/*           站内信
+//  /v1/client_push/*           推送注册
+//  /v1/config/*                远程配置
+//  /v1/trade/order             订单
+//  /v1/app_search/top_n        搜索
+//  /v1/file_distribution/*     /v1/file_distribution_v2/*   文件分发
+//  /v1/filepicker/*            文件上传
+//  /v1/game_discussion/*       社区
+//  /v1/event/client_log_upload 埋点
+//  /token/fp/gen               设备指纹短令牌
+//  /v1/feedback/*              反馈
+//  /v1/network_probe/config    探测配置
+//  /v1/download_client/upgrade 分发客户端升级
+//  /exchange/code              兑换码
+//  /v1/open/share/feed/*       分享
+
+// --- A.4  P3/NgPersonalInfoList -------------------------------------------
+//  /api/realname/*                                 实名
+//  /api/users/bind_account/query                    绑定查询
+//  /api/users/face_recognition/link                 人脸识别链接
+//  /api/users/face_recognition/link_by_user         按用户查询人脸链接
+//  /api/personal/link                               个人信息关联
+
+// --- A.5  P4 mpay 账号与支付 ----------------------------------------------
+//  /users/login/mobile/*            手机号登录 (send_code / verify / login)
+//  /users/login/pc/oauth            PC OAuth
+//  /users/login/qrcode/exchange_token   扫码换 token
+//  /users/login/ticket              票据登录
+//  /users/create_ticket             创建一次性票据
+//  /users/check_token               令牌校验
+//  /users/realname/verify           实名校验
+//  /qrcode/create_login             /qrcode/create_pay
+//  /qrcode/image                    /qrcode/query /qrcode/query_external
+//  /qrcode/contract/query           签约查询
+//  /payments/one_step_payment/games 一步支付
+//  /payments/pay_confirm/*          支付确认/查询/取消
+//  /v3/client/*                     客户端配置 / 设备注册
+//  头: X-JMGq / X-Mpay-Timestamp
+//  Netease.Ncg.Pay.dll:  https://%s/topup/game-webview/checkout (X-Login-Token)
+
+// --- A.6  P5 Orbit P2P/CDN ------------------------------------------------
+//  https://filecatch.nie.%s/api/v1/log
+//  https://impression.update.%s/logcatch/%s/%s.json
+//  sigma-orbitv3-impression.proxima.nie.*
+//  httpdns.nie.*
+//  头: X-NTES-PROJECT / X-NTES-SDK / X-Ntes-Orbit-ID / X-Ntes-Orbit-Ver
+
+// --- A.7  P6 下载与内容寻址 -----------------------------------------------
+//  http://127.0.0.1:5000   /download_ipc/{version,heartbeat,ipc,download,util}.go
+//  http://127.0.0.1:7000   /downloadable_v2/{createtruncate,finish_upload,
+//                            gen_token,update_manifest_classic,update_manifest_url}
+//  /v1/file_distribution/download_appchunk
+//  /v1/file_distribution/reportchunk
+//  /v1/file_distribution_v2/{decode_version_code,manifest_urlsum}
+//  x19-h.gdl.netease.com   /{hex16}/{decimal20}.index
+//  x19.fp.ps.netease.com   /file/<hex24><base62>NN
+//  x19.gdl.netease.com     更新/资源
+
+// --- A.8  P7 更新与安装 ---------------------------------------------------
+//  x19.update.*  x19apigatewayobt.nie.*  x19mclobt.nie.*
+//  */salog/urgent-log                    紧急日志上传
+//  nlib.dat / uninstall.dat / uninstall.exe / nlib.exe  (Inno Setup)
+//     头: X-Auth-Token / X-Auth-User
+//  WPFInstaller.exe  (336.9 MB, 32 个模块私有混淆头)
+
+// --- A.9  P8 崩溃上报 -----------------------------------------------------
+//  appdump.nie.easebar.com/upload
+//  appdump.nie.netease.com/upload
+//  myappdump.dll 转储 / UniCrashReporter.exe / Loop0.exe
+//  字段: event_info (嵌套 JSON)
+
+// --- A.10 P9 实时媒体与直播 -----------------------------------------------
+//  api.cc.163.com/v1/distroommsg/serviceip
+//  gate.cc.163.com/userlogin/get_ex_linkd
+//  audiouser.cc.163.com/v1/sdkctrl/check
+//  statlog.cc.163.com/query   statlog.cc.netease.com/query
+//  cc.fp.ps.netease.com
+//  udp.v.cc.163.pull.com
+//  http://%s:%d/qnet/get_node_list?key=%s
+//  seeds-open.xinqiucc.com/api/sdk/get_seeds
+//  sd-glsky.xycdn.com/psdk/getsdks
+//  sd-gl.comfylink.com/psdk/getseeds_v3
+//  ipip-gl1.hongboluo.com/multiDnsQuery
+//  头: X-Xy-Bip / X-Xy-BipH / X-Xy-CipH / X-Xy-Ntype
+
+// --- A.11 P10 基岩版客户端 ------------------------------------------------
+//  Minecraft.Windows.exe  /im  /log
+//     头: X-Gvm / X-IhM / X-KZn / X-KoF / X-d3z / X-qET / X-zEhGO
+//  mcl.common.dll       头: X-Ye38 / X-np0
+//  mcl.common.gray.dll  头: X-tRtzc
+//  RakNet.dll  UDP 二进制联机协议
+
+// --- A.12 P11 反作弊与环境检测 --------------------------------------------
+//  libenvsdk.dll   头: X-ptn
+//  WinlicenseSDK / SecureEngineSDK32 / Snappy.NET / XOREncryptDLL.dll
+
+// --- A.13 P12 WebView 宿主 ------------------------------------------------
+//  cefwebview.dll / webview_support_helper.dll / webview_support.dll
+//  承载 mpay 支付页 / 实名页 / 活动页等 H5 流程
+
+// ===========================================================================
+// 附录 B  自定义请求头全表说明
+//   共登记 110 项 (见 enum ObservedHeader)。
+//   - 第 39 项以前: 语义可读头 (Authorization / X-Client-Sign / X-Auth-Token ...)
+//   - 第 40 项以后: 70 项模块私有混淆头, 形如 X-<随机串>
+//     (X-a53 / X-Ye38 / X-zEhGO / X-ptn / X-JMGq ...)
+//     其 <名称> 已实证, 但 <取值语义与生成算法> 未还原 (E3)。
+//   本测绘不还原任何签名/密钥派生算法, 仅登记字段存在性与出现位置。
+// ===========================================================================
+
+// 附录 C  取证等级
+//   [E1] 直接实证 —— 字符串/结构直接从可执行文件或运行时产物中提取
+//   [E2] 推导     —— 由字段命名惯例、成对出现、调用时序推导
+//   [E3] 未还原   —— 字段存在但语义/算法未确定 (含全部签名与加密域)
